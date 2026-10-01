@@ -84,6 +84,9 @@ jobs:
         env:
           AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@host.docker.internal:5432/airflow
         run: |
+          # --entrypoint pytest: the image's entrypoint is `airflow`, so a bare `pytest` is
+          # read as an airflow subcommand and fails listing the valid ones.
           docker compose run --rm --no-deps \
             -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN \
-            airflow-scheduler pytest tests -q
+            --entrypoint pytest \
+            airflow-scheduler tests -q

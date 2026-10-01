@@ -1,0 +1,63 @@
+name: terraform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "scripts-bootstrap.sh"
+  pull_request:
+    paths:
+      - "terraform/**"
+      - "scripts-bootstrap.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate the Terraform
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.5"
+
+      - name: fmt
+        # Checked rather than applied: a commit that reformats someone else's HCL should fail
+        # review, not land as a drive-by diff.
+        run: terraform -chdir=terraform fmt -check -diff
+
+      - name: init
+        # Backend disabled: validation must not need credentials, and CI has no state to lock.
+        run: terraform -chdir=terraform init -backend=false -input=false
+
+      - name: validate
+        run: terraform -chdir=terraform validate
+
+      - name: shellcheck the bootstrap
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck scripts-bootstrap.sh
+
+  # A plan against a real tenancy is the only way to catch a provider-side change, and it needs
+  # credentials this repository deliberately does not have. Run it locally against your own
+  # tenancy; the plan is worth reading before the first apply either way.
+  #
+  #   cd terraform
+  #   cp terraform.tfvars.example terraform.tfvars   # fill in
+  #   terraform plan

@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars and fill in. Never commit the real file.
+
+region     = "sa-saopaulo-1"
+compartment_ocid = "ocid1.tenancy.oc1..<compartment>"
+
+# Narrow this to your own address. The default opens SSH to the entire internet on a host
+# that will hold deployment credentials.
+allowed_ssh_cidr = "203.0.113.10/32"
+
+# Set to null to keep the Airflow UI off the public internet entirely.
+airflow_ui_port = 8080

@@ -8,29 +8,50 @@ x-airflow-common: &airflow-common
     context: .
     dockerfile: Dockerfile
   environment: &airflow-env
-    AIRFLOW_HOME: /usr/local/airflow
-    AIRFLOW__CORE__DAGS_FOLDER: /usr/local/airflow/dags
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
     AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-    AIRFLOW__CORE__PLUGINS_FOLDER: /usr/local/airflow/plugins
+    AIRFLOW__CORE__PLUGINS_FOLDER: /opt/airflow/plugins
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
     AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: "10"
-    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "60"
+    # Every Airflow process must share one Fernet key. Each container generates its own in
+    # airflow.cfg, so without this the connection password encrypted by airflow-init cannot be
+    # decrypted by the scheduler — and the symptom is not a crypto error but a task failing with
+    # "the conn_id isn't defined", which sends you looking for the connection instead of the key.
+    #
+    # Set this from a secret in any real deployment. Rotating it invalidates every stored
+    # connection and variable.
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-edN4v54CSgsl3By6qJQ4B7VUw_pcfQ-hAcNNdHHS9f4=}
+    # refresh_interval is the current name for this; SCHEDULER__DAG_DIR_LIST_INTERVAL is
+    # deprecated and warns on every start.
+    AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "60"
+    # A Cosmos DAG runs `dbt deps` and `dbt ls` while the file is being imported, so parsing it
+    # legitimately takes far longer than Airflow's 30s default. Without this the DAG reports an
+    # import timeout, which reads as a broken DAG file rather than a too-small timeout.
+    AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: "180"
+    AIRFLOW__DAG_PROCESSOR__DAG_FILE_PROCESSOR_TIMEOUT: "300"
     AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backends.session"
+    # Airflow 3 takes its users from here (SimpleAuthManager); `airflow users create` is gone.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${_AIRFLOW_WWW_USER_USERNAME:-admin}:admin"
     _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
     _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
     # Read by dags/include/dwh_pipelines/warehouse.py. The webserver and scheduler must agree on
     # this or a DAG would be parsed as dev by one and prod by the other.
     DWH_ENVIRONMENT: ${DWH_ENVIRONMENT:-dev}
-    PYTHONPATH: /usr/local/airflow/include
+    PYTHONPATH: /opt/airflow/include
   user: "${AIRFLOW_UID:-50000}:0"
+  # host.docker.internal exists on Docker Desktop for Mac and Windows but not on Linux, where
+  # this resolves it to the host gateway. Without it the warehouse connection fails with a DNS
+  # error naming nothing about Docker.
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   volumes:
-    - ./dags:/usr/local/airflow/dags
-    - ./include:/usr/local/airflow/include
-    - ./tests:/usr/local/airflow/tests
+    - ./dags:/opt/airflow/dags
+    - ./include:/opt/airflow/include
+    - ./tests:/opt/airflow/tests
     # The dbt project lives in its own repository. Mounted read-only: Airflow runs it, it does
     # not own it, and a DAG that could edit the project it depends on is a DAG that can break
     # its own dependency.
-    - ../dwh-dbt/data_warehouse:/usr/local/airflow/dbt/saas_metrics_dw:ro
+    - ../dwh-dbt/data_warehouse:/opt/airflow/dbt/saas_metrics_dw:ro
   depends_on:
     postgres:
       condition: service_healthy
@@ -62,27 +83,36 @@ services:
       - |
         set -euo pipefail
         airflow db migrate
-        airflow users create \
-          --username "$${_AIRFLOW_WWW_USER_USERNAME}" \
-          --password "$${_AIRFLOW_WWW_USER_PASSWORD}" \
-          --firstname Warehouse --lastname Admin \
-          --role Admin \
-          --email admin@example.com || true
+
+        # Note: the connection's *schema* field carries the DATABASE name, not the Postgres
+        # schema. Cosmos maps dbt's `dbname` from conn.schema and takes the Postgres schema from
+        # profile_args. Putting "public" here points dbt at a database called public, and the
+        # failure is a connection error naming a database that was never meant to exist.
+        airflow connections delete warehouse_postgres --yes 2>/dev/null || true
         airflow connections add warehouse_postgres \
           --conn-type postgres \
           --conn-host "$${WAREHOUSE_HOST:-host.docker.internal}" \
           --conn-port "$${WAREHOUSE_PORT:-5434}" \
           --conn-login "$${WAREHOUSE_USER:-saas}" \
           --conn-password "$${WAREHOUSE_PASSWORD:-saas}" \
-          --conn-schema public \
-          --conn-dbname "$${WAREHOUSE_DB:-saas_dw}" || true
-        airflow variables set dbt_env "$${DWH_ENVIRONMENT:-dev}" || true
+          --conn-schema "$${WAREHOUSE_DB:-saas_dw}" \
+          --conn-description "SaaS warehouse: read by the dbt build and the reporting task"
+
         echo "init complete"
 
+        # No `airflow users create`: it does not exist in Airflow 3, where SimpleAuthManager
+        # takes its users from [core] simple_auth_manager_users — see the environment block above.
+        #
+        # The target environment is also an OS environment variable (DWH_ENVIRONMENT), not an
+        # Airflow Variable. A Variable can be edited from the UI between the scheduler parsing
+        # and a task running, which is how a deployment ends up half dev and half prod. The OS
+        # env is set once for the whole deployment and every process agrees on it.
+
+  # Airflow 3 serves the UI from api-server; there is no `airflow webserver` command any more.
   airflow-webserver:
     <<: *airflow-common
     container_name: airflow-webserver
-    command: webserver
+    command: api-server
     ports:
       - "8080:8080"
     healthcheck:
@@ -91,6 +121,12 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
+
+  # The DAG processor is a separate process in Airflow 3, not part of the scheduler.
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: airflow-dag-processor
+    command: dag-processor
 
   airflow-scheduler:
     <<: *airflow-common

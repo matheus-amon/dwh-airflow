@@ -2,4 +2,14 @@
 #
 # dbt-postgres and astronomer-cosmos are installed in the Dockerfile rather than here, so that
 # the base image already contains them and only this small file changes on most edits.
+#
+# asyncpg is required by Airflow 3's async metadata engine. The slim image does not ship it, and
+# without it every process that touches the metadata database fails at startup with a bare
+# ModuleNotFoundError that mentions neither Airflow nor the database.
+#
+# psycopg3 is what the reporting task uses to read a mart. dbt-postgres brings psycopg2 for its
+# own connections; the task speaks psycopg3 and would otherwise fail at DAG parse time, because
+# a DAG file is executed on every scheduler tick.
+asyncpg>=0.30.0
+psycopg[binary]>=3.2.0
 pytest>=8.3.0

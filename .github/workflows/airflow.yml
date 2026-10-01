@@ -68,10 +68,12 @@ jobs:
         # installs, so a cache hit would save a few minutes and hide a dependency change.
         run: docker compose build --build-arg CACHEBUST=${{ github.run_id }}
 
+      # The host is host.docker.internal, not localhost: from inside the container localhost is
+      # the container. docker-compose.yml already maps the name to the host gateway.
       - name: Migrate the metadata database
         working-directory: dwh-airflow
         env:
-          AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@localhost:5432/airflow
+          AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@host.docker.internal:5432/airflow
         run: |
           docker compose run --rm --no-deps \
             -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN \
@@ -80,7 +82,7 @@ jobs:
       - name: Test the DAGs
         working-directory: dwh-airflow
         env:
-          AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@localhost:5432/airflow
+          AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@host.docker.internal:5432/airflow
         run: |
           docker compose run --rm --no-deps \
             -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN \

@@ -1,0 +1,87 @@
+name: airflow
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: airflow-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dags:
+    name: Build the image and test the DAGs
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    services:
+      # Airflow's own metadata database. The warehouse itself is not here: these tests assert
+      # that the DAGs parse and are shaped correctly, which does not need a warehouse, and a CI
+      # job that builds one million synthetic events to check a config function is a CI job that
+      # eventually gets skipped.
+      metadata:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: airflow
+          POSTGRES_PASSWORD: airflow
+          POSTGRES_DB: airflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U airflow -d airflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The dbt project has to be at ../dwh-dbt/data_warehouse, because that is where
+          # docker-compose mounts it from. GitHub runners have no such parent directory, so it
+          # is created explicitly rather than relying on Docker to invent it.
+          path: dwh-airflow
+
+      - name: Check out the warehouse
+        uses: actions/checkout@v7
+        with:
+          repository: matheus-amon/dwh-dbt
+          path: dwh-dbt
+
+      - name: Point the compose mount at the checked-out warehouse
+        run: |
+          cd dwh-dbt
+          git sparse-checkout set data_warehouse --no-cone 2>/dev/null || true
+          ls data_warehouse/dbt_project.yml
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build the image
+        working-directory: dwh-airflow
+        # No cache-from the registry: the image is built from a pinned base and two pinned pip
+        # installs, so a cache hit would save a few minutes and hide a dependency change.
+        run: docker compose build --build-arg CACHEBUST=${{ github.run_id }}
+
+      - name: Migrate the metadata database
+        working-directory: dwh-airflow
+        env:
+          AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@localhost:5432/airflow
+        run: |
+          docker compose run --rm --no-deps \
+            -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN \
+            airflow-scheduler airflow db migrate
+
+      - name: Test the DAGs
+        working-directory: dwh-airflow
+        env:
+          AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@localhost:5432/airflow
+        run: |
+          docker compose run --rm --no-deps \
+            -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN \
+            airflow-scheduler pytest tests -q

@@ -1,1 +1,5 @@
-# Astro Runtime includes the following pre-installed providers packages: https://www.astronomer.io/docs/astro/runtime-image-architecture#provider-packages
+# Runtime dependencies beyond the image's own.
+#
+# dbt-postgres and astronomer-cosmos are installed in the Dockerfile rather than here, so that
+# the base image already contains them and only this small file changes on most edits.
+pytest>=8.3.0

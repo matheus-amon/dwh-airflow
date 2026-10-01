@@ -1,0 +1,118 @@
+# Airflow 3 with the dbt warehouse from ../dwh-dbt.
+#
+# Five services, the same shape as the official compose example: a metadata Postgres, a one-shot
+# init task, and the three Airflow processes. Postgres for the warehouse itself is NOT here —
+# it belongs to ../dwh-config-local, which owns the data. This stack talks to it over the network.
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  environment: &airflow-env
+    AIRFLOW_HOME: /usr/local/airflow
+    AIRFLOW__CORE__DAGS_FOLDER: /usr/local/airflow/dags
+    AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+    AIRFLOW__CORE__PLUGINS_FOLDER: /usr/local/airflow/plugins
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+    AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: "10"
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "60"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backends.session"
+    _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
+    _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-admin}
+    # Read by dags/include/dwh_pipelines/warehouse.py. The webserver and scheduler must agree on
+    # this or a DAG would be parsed as dev by one and prod by the other.
+    DWH_ENVIRONMENT: ${DWH_ENVIRONMENT:-dev}
+    PYTHONPATH: /usr/local/airflow/include
+  user: "${AIRFLOW_UID:-50000}:0"
+  volumes:
+    - ./dags:/usr/local/airflow/dags
+    - ./include:/usr/local/airflow/include
+    - ./tests:/usr/local/airflow/tests
+    # The dbt project lives in its own repository. Mounted read-only: Airflow runs it, it does
+    # not own it, and a DAG that could edit the project it depends on is a DAG that can break
+    # its own dependency.
+    - ../dwh-dbt/data_warehouse:/usr/local/airflow/dbt/saas_metrics_dw:ro
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: airflow_metadata
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    ports:
+      - "${AIRFLOW_POSTGRES_PORT:-5435}:5432"
+    volumes:
+      - airflow_metadata_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -euo pipefail
+        airflow db migrate
+        airflow users create \
+          --username "$${_AIRFLOW_WWW_USER_USERNAME}" \
+          --password "$${_AIRFLOW_WWW_USER_PASSWORD}" \
+          --firstname Warehouse --lastname Admin \
+          --role Admin \
+          --email admin@example.com || true
+        airflow connections add warehouse_postgres \
+          --conn-type postgres \
+          --conn-host "$${WAREHOUSE_HOST:-host.docker.internal}" \
+          --conn-port "$${WAREHOUSE_PORT:-5434}" \
+          --conn-login "$${WAREHOUSE_USER:-saas}" \
+          --conn-password "$${WAREHOUSE_PASSWORD:-saas}" \
+          --conn-schema public \
+          --conn-dbname "$${WAREHOUSE_DB:-saas_dw}" || true
+        airflow variables set dbt_env "$${DWH_ENVIRONMENT:-dev}" || true
+        echo "init complete"
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow-triggerer
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type TriggererJob --hostname \"$${HOSTNAME}\""]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  airflow_metadata_data:

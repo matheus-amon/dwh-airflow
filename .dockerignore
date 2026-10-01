@@ -1,8 +1,9 @@
-astro
 .git
+.github
+.gitignore
+logs
+__pycache__
+.pytest_cache
+tests
 .env
-airflow_settings.yaml
-logs/
-.venv
-airflow.db
-airflow.cfg
+README.md

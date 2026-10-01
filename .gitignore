@@ -1,12 +1,19 @@
-.git
-.env
-.DS_Store
-airflow_settings.yaml
-__pycache__/
-astro
-.venv
-airflow-webserver.pid
-webserver_config.py
-airflow.cfg
+# Airflow runtime state
 airflow.db
-.astro
+airflow.cfg
+airflow-webserver.pid
+logs/
+standalone_admin_password.txt
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
